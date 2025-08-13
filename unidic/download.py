@@ -7,13 +7,29 @@ import time
 from wasabi import msg
 from tqdm import tqdm
 
+# This is used to show progress when downloading.
+# see here: https://github.com/tqdm/tqdm#hooks-and-callbacks
 class TqdmUpTo(tqdm):
+    """Provides `update_to(n)` which uses `tqdm.update(delta_n)`."""
     def update_to(self, b=1, bsize=1, tsize=None):
+        """
+        b  : int, optional
+            Number of blocks transferred so far [default: 1].
+        bsize  : int, optional
+            Size of each block (in tqdm units) [default: 1].
+        tsize  : int, optional
+            Total size (in tqdm units). If [default: None] remains unchanged.
+        """
         if tsize is not None:
             self.total = tsize
         self.update(b * bsize - self.n)
 
 def download_file_with_resume(url, fname):
+    """Download a file with resume support.
+
+    This will download the file from the url and save it to the fname. If the
+    file already exists, it will resume the download from where it left off.
+    """
     existing_size = 0
     if os.path.exists(fname):
         existing_size = os.path.getsize(fname)
@@ -82,6 +98,11 @@ def get_json(url, desc):
     return r.json()
 
 def download_and_clean(version, url, dirname='unidic', delfiles=[]):
+    """Download unidic and prep the dicdir.
+
+    This downloads the zip file from the source, extracts it, renames the
+    resulting directory, and removes large files not used at runtime.  
+    """
     cdir = os.path.dirname(os.path.abspath(__file__))
     fname = os.path.join(cdir, 'unidic.zip')
     print("Downloading UniDic v{}...".format(version), file=sys.stderr)
@@ -125,10 +146,12 @@ def download_and_clean(version, url, dirname='unidic', delfiles=[]):
         if os.path.exists(file_path):
             os.remove(file_path)
 
+    # save a version file so we can tell what it is
     vpath = os.path.join(dicdir, 'version')
     with open(vpath, 'w') as vfile:
         vfile.write('unidic-{}'.format(version))
 
+    # Write a dummy mecabrc
     with open(os.path.join(dicdir, 'mecabrc'), 'w') as mecabrc:
         mecabrc.write('# This is a dummy file.')
 
