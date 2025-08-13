@@ -3,41 +3,72 @@ import shutil
 import zipfile
 import os
 import sys
+import time
 from wasabi import msg
-from urllib.request import urlretrieve
 from tqdm import tqdm
 
-# This is used to show progress when downloading.
-# see here: https://github.com/tqdm/tqdm#hooks-and-callbacks
 class TqdmUpTo(tqdm):
-    """Provides `update_to(n)` which uses `tqdm.update(delta_n)`."""
     def update_to(self, b=1, bsize=1, tsize=None):
-        """
-        b  : int, optional
-            Number of blocks transferred so far [default: 1].
-        bsize  : int, optional
-            Size of each block (in tqdm units) [default: 1].
-        tsize  : int, optional
-            Total size (in tqdm units). If [default: None] remains unchanged.
-        """
         if tsize is not None:
             self.total = tsize
-        self.update(b * bsize - self.n)  # will also set self.n = b * bsize
+        self.update(b * bsize - self.n)
 
-def download_file(url, fname):
-    with requests.get(url, stream=True) as r:
-        with open(fname, 'wb') as f:
-            shutil.copyfileobj(r.raw, f)
-
+def download_file_with_resume(url, fname):
+    existing_size = 0
+    if os.path.exists(fname):
+        existing_size = os.path.getsize(fname)
+    
+    headers = {}
+    if existing_size:
+        headers['Range'] = f'bytes={existing_size}-'
+    
+    mode = 'ab' if existing_size else 'wb'
+    retries = 3
+    attempt = 0
+    
+    while attempt < retries:
+        try:
+            with requests.get(url, headers=headers, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                
+                total_size = int(r.headers.get('content-length', 0))
+                if existing_size and r.status_code == 206:
+                    total_size += existing_size
+                
+                with open(fname, mode) as f:
+                    with tqdm(
+                        total=total_size,
+                        initial=existing_size,
+                        unit='B',
+                        unit_scale=True,
+                        miniters=1,
+                        desc=url.split('/')[-1]
+                    ) as pbar:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                pbar.update(len(chunk))
+                return fname
+                
+        except (requests.exceptions.RequestException, ConnectionError) as e:
+            attempt += 1
+            if attempt < retries:
+                existing_size = os.path.getsize(fname)
+                headers['Range'] = f'bytes={existing_size}-'
+                time.sleep(5)
+            else:
+                raise
+    
     return fname
 
-def download_progress(url, fname):
-    """Download a file and show a progress bar."""
-    with TqdmUpTo(unit='B', unit_scale=True, miniters=1,
-              desc=url.split('/')[-1]) as t:  # all optional kwargs
-        urlretrieve(url, filename=fname, reporthook=t.update_to, data=None)
-        t.total = t.n
-    return fname
+def validate_zip_file(fname):
+    try:
+        with zipfile.ZipFile(fname, 'r') as zf:
+            if zf.testzip() is not None:
+                return False
+        return True
+    except zipfile.BadZipFile:
+        return False
 
 def get_json(url, desc):
     r = requests.get(url)
@@ -51,17 +82,30 @@ def get_json(url, desc):
     return r.json()
 
 def download_and_clean(version, url, dirname='unidic', delfiles=[]):
-    """Download unidic and prep the dicdir.
-
-    This downloads the zip file from the source, extracts it, renames the
-    resulting directory, and removes large files not used at runtime.  
-    """
     cdir = os.path.dirname(os.path.abspath(__file__))
     fname = os.path.join(cdir, 'unidic.zip')
     print("Downloading UniDic v{}...".format(version), file=sys.stderr)
-    download_progress(url, fname)
-    print("Finished download.")
-
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            download_file_with_resume(url, fname)
+            if validate_zip_file(fname):
+                print("Download completed successfully.")
+                break
+            else:
+                print("Downloaded file is corrupt, retrying...")
+                os.remove(fname)
+        except Exception as e:
+            print(f"Download failed (attempt {attempt+1}/{max_retries}): {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                if os.path.exists(fname):
+                    os.remove(fname)
+            else:
+                raise RuntimeError("Failed to download valid file after multiple attempts")
+    
+    print("Extracting archive...")
     with zipfile.ZipFile(fname, 'r') as zf:
         zf.extractall(cdir)
     os.remove(fname)
@@ -71,17 +115,20 @@ def download_and_clean(version, url, dirname='unidic', delfiles=[]):
         shutil.rmtree(dicdir)
 
     outdir = os.path.join(cdir, dirname)
-    shutil.move(outdir, dicdir)
+    if os.path.exists(outdir):
+        shutil.move(outdir, dicdir)
+    else:
+        raise FileNotFoundError(f"Extracted directory not found: {outdir}")
 
     for dfile in delfiles:
-        os.remove(os.path.join(dicdir, dfile))
+        file_path = os.path.join(dicdir, dfile)
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
-    # save a version file so we can tell what it is
     vpath = os.path.join(dicdir, 'version')
     with open(vpath, 'w') as vfile:
         vfile.write('unidic-{}'.format(version))
 
-    # Write a dummy mecabrc
     with open(os.path.join(dicdir, 'mecabrc'), 'w') as mecabrc:
         mecabrc.write('# This is a dummy file.')
 
@@ -102,4 +149,3 @@ def download_version(ver="latest"):
     print("download url:", dictinfo['url'])
     print("Dictionary version:", dictinfo['version'])
     download_and_clean(dictinfo['version'], dictinfo['url'])
-
